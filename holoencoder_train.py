@@ -12,17 +12,19 @@ import torchvision.transforms as transforms
 import os
 from torch.utils.data import DataLoader
 from skimage.metrics import structural_similarity as ssim
+import matplotlib.pyplot as plt
+
 
 # ---------基本パラメータ設定---------
-z = 400 #伝搬距離
+z = 200 #伝搬距離
 num_epoch = 30 # 学習エポック数
 train_size = 700 # 学習データ枚数
 valid_size = 100 # 検証データ枚数
 
 pitch = 8.0e-3 # ピクセルピッチ
 wavelength = 639e-6 # 光の波長
-h = 544 # 画像の縦解像度
-w = 960 # 画像の横解像度
+h = 1072 # 画像の縦解像度
+w = 1920 # 画像の横解像度
 slm_res = (h, w) # SLM解像度
 
 # CPU/GPU自動切換え
@@ -38,6 +40,7 @@ h = np.array(h)
 w = np.array(w)
 h = torch.from_numpy(h)
 w = torch.from_numpy(w)
+
 
 # 周波数分解能
 v = 1 / (h * pitch)
@@ -167,7 +170,7 @@ class holoencoder(nn.Module):
     
 # ---------Training Parameters---------
 lr = 0.001 # 学習率
-batch_size = 2 # バッチサイズ
+batch_size = 1 # バッチサイズ
 model = holoencoder() # モデル設定
 criterion = nn.MSELoss() # 損失関数設定
 # optimizier = torch.optim.Adam(model.parameters(), lr=lr)
@@ -179,8 +182,8 @@ if torch.cuda.is_available():
 H=H.to(device)
 optvers=[{'params': model.parameters()}]
 optimizier = torch.optim.Adam(optvers, lr=lr)
-train_path=r"C:\Users\harap\Downloads\DIV2K_train_HR"
-valid_path=r"C:\Users\harap\Downloads\DIV2K_valid_HR"
+train_path="./DIV2K_train_HR"
+valid_path="./DIV2K_valid_HR"
 train_loss=[] # 学習損失の推移
 valid_loss=[] # 検証損失推移
 
@@ -195,12 +198,12 @@ class ToTensorFromBGR(object):
 
 # Transforms定義
 train_transform = transforms.Compose([
-    transforms.Lambda(lambda img: cv2.resize(img, (960, 544))), # リサイズ
+    transforms.Lambda(lambda img: cv2.resize(img, (1920, 1072))), # リサイズ
     ToTensorFromBGR(),
 ])
 
 valid_transform = transforms.Compose([
-    transforms.Lambda(lambda img: cv2.resize(img, (960, 544))), # リサイズ
+    transforms.Lambda(lambda img: cv2.resize(img, (1920, 1072))), # リサイズ
     ToTensorFromBGR(),
 ])
 
@@ -227,12 +230,12 @@ class DIV2KHoloDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.ids)
 
-train_set = DIV2KHoloDataset(r"C:\Users\harap\Downloads\DIV2K_train_HR",
+train_set = DIV2KHoloDataset("./DIV2K_train_HR",
                             ids=range(100,800),
                             transform=train_transform)
 
-valid_set = DIV2KHoloDataset(r"C:\Users\harap\Downloads\DIV2K_valid_HR",
-                             ids=range(0,100),
+valid_set = DIV2KHoloDataset("./DIV2K_valid_HR",
+                             ids=range(801,901),
                              transform=valid_transform)
 
 target_amp = train_set[0].to(device)
@@ -254,12 +257,28 @@ torch.manual_seed(123)
 torch.cuda.manual_seed(123)
 
 # 評価結果記録用
-history = np.zeros((0,5))
+history = np.zeros((0,3))
 
+# print("len(train_set) =", len(train_set))
+# print("len(valid_set) =", len(valid_set))
+# print("len(train_loader) =", len(train_loader))
+# exit()
+
+# print("CWD:", os.getcwd())
+# print("train samples:", len(train_set), "valid samples:", len(valid_set))
+# first_train_id = min(train_set.ids)
+# first_valid_id = min(valid_set.ids)
+# print("first train path exists?:",
+#       os.path.exists(os.path.join(train_path, f"{first_train_id:04d}.png")))
+# print("first valid path exists?:",
+#       os.path.exists(os.path.join(valid_path, f"{first_valid_id:04d}.png")))
+
+# exit()
 
 # ---------Training Loop---------
 # 繰り返しメインループ
 for epoch in range(num_epoch):
+    model.train()
     # 1エポックあたりの累積損失（平均化前）
     train_current_loss, valid_current_loss = 0, 0
     # 1エポックあたりのデータ累積件数
@@ -272,7 +291,7 @@ for epoch in range(num_epoch):
         
         # 位相マップを生成
         outputs = model(inputs)
-        # (B, 1, H, W)⇒(B, H, W) 2つ目のちゃんねる消去
+        # (B, 1, H, W)⇒(1, H, W) 2つ目のちゃんねる消去
         outputs = outputs.squeeze(1)
         
         # 位相⇒複素波変換（後の計算のため）
@@ -296,42 +315,69 @@ for epoch in range(num_epoch):
         # パラメータ更新
         optimizier.step()
         # 損失合計
-        train_current_loss += loss.item()
+        batch_n = inputs.size(0)
+        train_current_loss += loss.item() * batch_n
+        n_train += batch_n
    
-# 予測フェーズ     
-with torch.no_grad():
-    for inputs_valid in tqdm(valid_loader):
-        # GPUに転送
-        inputs_valid = inputs_valid.to(device)
+    # 予測フェーズ     
+    model.eval()
+    with torch.no_grad():
+        for inputs_valid in tqdm(valid_loader):
+            # GPUに転送
+            inputs_valid = inputs_valid.to(device)
+            
+            # 位相マップを生成
+            outputs_valid = model(inputs_valid)
+            # (1, 1, H, W)⇒(H, W)
+            outputs_valid = outputs_valid.squeeze(1)
+            
+            # 位相⇒複素波変換（後の計算のため）
+            gray_real_valid = torch.cos(outputs_valid)
+            gray_image_valid = torch.sin(outputs_valid)
+            gray_valid = torch.complex(gray_real_valid, gray_image_valid)
         
-        # 位相マップを生成
-        outputs_valid = model(inputs_valid)
-        # (1, 1, H, W)⇒(H, W)
-        outputs_valid = outputs_valid.squeeze(1)
-        
-        # 位相⇒複素波変換（後の計算のため）
-        gray_real_valid = torch.cos(outputs_valid)
-        gray_image_valid = torch.sin(outputs_valid)
-        gray_valid = torch.complex(gray_real_valid, gray_image_valid)
-       
-        # 角スペクトル変換
-        prop_valid = torch.fft.fftn(gray_valid, dim=(-2, -1)) # フーリエ変換
-        prop_valid = H * prop_valid # 伝達関数
-        prop_valid = torch.fft.ifftn(prop_valid, dim=(-2, -1)).abs() # 逆フーリエ変換→再構成像
-        
-        # inputs = inputs.double()
-        target_valid = inputs_valid.squeeze(1)
-        # 損失計算
-        loss_valid = criterion(prop_valid, target_valid)
-        # 損失合計
-        valid_current_loss += loss_valid.item()
+            # 角スペクトル変換
+            prop_valid = torch.fft.fftn(gray_valid, dim=(-2, -1)) # フーリエ変換
+            prop_valid = H * prop_valid # 伝達関数
+            prop_valid = torch.fft.ifftn(prop_valid, dim=(-2, -1)).abs() # 逆フーリエ変換→再構成像
+            
+            # inputs = inputs.double()
+            target_valid = inputs_valid.squeeze(1)
+            # 損失計算
+            loss_valid = criterion(prop_valid, target_valid)
+            # 損失合計
+            batch_n = inputs_valid.size(0)
+            valid_current_loss += loss_valid.item() * batch_n
+            n_valid += batch_n
 
     # 学習後の保存
     ave_train_loss = train_current_loss / n_train
     ave_valid_loss = valid_current_loss / n_valid
     # 表示
-    print(f'Epoch [{epoch+1}/{epoch}], loss: {ave_train_loss:.5f} val_loss: {ave_valid_loss:.5f}')
-    # 記録
+    print(f'Epoch [{epoch+1}/{num_epoch}], loss: {ave_train_loss:.5f} val_loss: {ave_valid_loss:.5f}')
+    # 記録・保存
     item = np.array([epoch+1, ave_train_loss, ave_valid_loss]) 
     history = np.vstack((history, item))   
     torch.save(model.state_dict(), 'holoencoderstate.pth')
+    
+
+# --------- Loss 曲線のプロット＆保存 ---------
+# history: [epoch, train_loss, valid_loss]
+epochs = history[:, 0]
+train_losses = history[:, 1]
+valid_losses = history[:, 2]
+
+plt.figure()
+plt.plot(epochs, train_losses, label="Train loss")
+plt.plot(epochs, valid_losses, label="Valid loss")
+plt.xlabel("Epoch")
+plt.ylabel("MSE Loss")
+plt.title("Training / Validation Loss")
+plt.legend()
+plt.grid(True)
+
+# 画像として保存（カレントディレクトリに loss_curve.png ができる）
+plt.savefig("loss_curve.png", dpi=300)
+plt.close()
+
+plt.show()

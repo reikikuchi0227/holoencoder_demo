@@ -13,14 +13,14 @@ from tqdm import tqdm
 from tqdm import trange
 
 # ---------基本パラメータ設定---------
-z = 400 #伝搬距離
-batch_size = 2
+z = 200 #伝搬距離
+batch_size = 1
 valid_size = 100 # 検証データ枚数
 
 pitch = 8.0e-3 # ピクセルピッチ
 wavelength = 639e-6 # 光の波長
-h = 544 # 画像の縦解像度
-w = 960 # 画像の横解像度
+h = 1072 # 画像の縦解像度
+w = 1920 # 画像の横解像度
 slm_res = (h, w) # SLM解像度
 
 # CPU/GPU自動切換え
@@ -29,19 +29,15 @@ print(device)
 
 # ---------伝搬フィルタ---------
 # サンプルインデックスの作成(tesor型)
-x = torch.linspace(-h//2, h//2-1, h, dtype=torch.float32)
-y = torch.linspace(-w//2, w//2-1, w, dtype=torch.float32)
-# tensor型に変換
-h = np.array(h)
-w = np.array(w)
-h = torch.from_numpy(h)
-w = torch.from_numpy(w)
+Hx = torch.linspace(-h//2, h//2 - 1, steps=h, dtype=torch.float32, device=device)
+Hy = torch.linspace(-w//2, w//2 - 1, steps=w, dtype=torch.float32, device=device)
 
-# 周波数分解能
-v = 1 / (h * pitch)
-u = 1 / (w * pitch)
-fx = x * v
-fy = y * u
+# 周波数分解能（スカラー）
+vx = 1.0 / (h * pitch)
+vy = 1.0 / (w * pitch)
+
+fx = Hx * vx
+fy = Hy * vy
 
 # 2D周波数平面
 fX, fY = torch.meshgrid(fx, fy, indexing='ij')
@@ -65,7 +61,7 @@ H = torch.complex(Hreal, Himage).to(device)
 
 
 # ---------U-Net---------
-# Dounサンプリング
+# Downサンプリング
 class Down(nn.Module):
     def __init__(self,
                  in_channels,
@@ -162,14 +158,6 @@ class holoencoder(nn.Module):
         
         return out8
 
-validpath=r"C:\Users\harap\Downloads\DIV2K_valid_HR"
-model = holoencoder()
-model.load_state_dict(torch.load('holoencoderstate.pth'))
-
-
-if torch.cuda.is_available():
-    model.cuda()
-
 
 # ---------Transform---------
 # 赤チャネルを取り出し，tensor変換transform⇒赤チャネルのみの（2160, 3840）テンソルにする
@@ -208,8 +196,8 @@ class DIV2KHoloDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.ids)
 
-valid_set = DIV2KHoloDataset(r"C:\Users\harap\Downloads\DIV2K_valid_HR",
-                             ids=range(0,100),
+valid_set = DIV2KHoloDataset("./DIV2K_valid_HR",
+                             ids=range(801,901),
                              transform=valid_transform)
 
 valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
@@ -217,41 +205,53 @@ valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
 
 # ---------model load---------
 model = holoencoder().to(device)
-ckpt = "holoencoder.pth"
+ckpt = "holoencoderstate.pth"
 state = torch.load(ckpt, map_location=device)
 model.load_state_dict(state)
-model.eval() # 検証
+validpath="./DIV2K_valid_HR"
 
 # ---------PSNR/SSIM---------
 # PSNR定義    
 # (B,H,W) or (H,W), 値域：[0,1]
-def PSNR(p_img: torch.Tensor, t_img: torch.Tensor, data_range: float = 1.0, eps: float = 1e-10):
+# def psnr(p_img: torch.Tensor, t_img: torch.Tensor, data_range: float = 1.0, eps: float = 1e-10):
+#     # (B,H,W)の場合
+#     if p_img.ndim() == 3:
+#         mse = torch.mean((p_img - t_img) ** 2, dim=(-2, -1)).clamp_min(eps) # (B,)ベクトル
+#         psnr = 20.0 * torch.log10(data_range / torch.sqrt(mse))
+#         return psnr.mean().item() # バッチごとに平均化・float型
+#     # (H,W)の場合    
+#     else:
+#         mse = torch.mean((p_img - t_img) ** 2).clamp_min(eps)
+#         return 20.0 * torch.log10(data_range / torch.sqrt(mse)).item()
+def psnr(p_img, t_img, data_range: float = 1.0, eps: float = 1e-10):
+    # numpy配列前提
     # (B,H,W)の場合
-    if p_img.dim() == 3:
-        mse = torch.mean((p_img - t_img) ** 2, dim=(-2, -2)).clamp_min(eps) # (B,)ベクトル
-        psnr = 20.0 * torch.log10(data_range / torch.sqrt(mse))
-        return psnr.mean().item() # バッチごとに平均化・float型
-    # (H,W)の場合    
-    else:
-        mse = torch.mean((p_img - t_img) ** 2).clamp_min(eps)
-        return 20.0 * torch.log10(data_range / torch.sqrt(mse)).item()
+    if p_img.ndim == 3:
+        mse = np.mean((p_img - t_img) ** 2, axis=(-2, -1))  # (B,)
+        mse = np.clip(mse, eps, None)
+        psnr = 20.0 * np.log10(data_range / np.sqrt(mse))    # (B,)
+        return float(psnr.mean())                            # バッチ平均
+    else:  # (H,W)の場合
+        mse = np.mean((p_img - t_img) ** 2)
+        mse = max(mse, eps)
+        return float(20.0 * np.log10(data_range / math.sqrt(mse)))
     
-# SSIM定義
-def SSIM(p_img: torch.Tensor, t_img: torch.Tensor, data_range: float = 1.0):
-    # skimageはnumpyなので都度CPUへ
-    p = p_img.detach().cpu().numpy()
-    t = t_img.detach().cpu().numpy()
+# # SSIM定義
+# def SSIM(p_img: torch.Tensor, t_img: torch.Tensor, data_range: float = 1.0):
+#     # skimageはnumpyなので都度CPUへ
+#     p = p_img.detach().cpu().numpy()
+#     t = t_img.detach().cpu().numpy()
     
-    # (B,H,W)の場合
-    if p.ndim == 3:
-        s = 0.0
-        for i in range(p.shape[0]):
-            s += ssim(t[i], p[i], data_range=data_range)
-        return s / p.shape[0] # バッチごとの平均を返す
+#     # (B,H,W)の場合
+#     if p.ndim == 3:
+#         s = 0.0
+#         for i in range(p.shape[0]):
+#             s += ssim(t[i], p[i], data_range=data_range)
+#         return s / p.shape[0] # バッチごとの平均を返す
     
-    # (H,W)の場合    
-    else:
-        return ssim(t, p, data_range=data_range)
+#     # (H,W)の場合    
+#     else:
+#         return ssim(t, p, data_range=data_range)
         
     
 total_psnr = 0
@@ -262,9 +262,10 @@ os.makedirs(save_dir, exist_ok=True)
 
 
 # ---------predict---------
-# 予測フェーズ     
+# 予測フェーズ
+model.eval()     
 with torch.no_grad():
-    for bidx, inputs_valid in tqdm(valid_loader):
+    for bidx, inputs_valid in enumerate(tqdm(valid_loader)):
         # GPUに転送
         inputs_valid = inputs_valid.to(device)
         
@@ -286,19 +287,22 @@ with torch.no_grad():
         target = inputs_valid.squeeze(1)
         
         # 正規化
-        maxv = torch.clamp(prop_valid.amax(dim=(-2,-1), keepdim=True), min=1e-8)
-        prop_n = prop_valid / maxv
+        # maxv = prop_valid.amax(dim=(-2, -1), keepdim=True).clamp_min(1e-8)
+        prop_n = prop_valid
+        
+        prop_np = prop_n.squeeze(0).detach().cpu().numpy()
+        target_np = target.squeeze(0).detach().cpu().numpy()
         
         # 指標
-        total_psnr += PSNR(prop_n, target, data_range=1.0)
-        total_ssim += SSIM(prop_n, target, data_range=1.0)
+        total_psnr += psnr(prop_np, target_np, data_range=1.0)
+        total_ssim += ssim(prop_np, target_np, data_range=1.0)
         n_img += 1
         
         # 可視化サンプル保存
         if bidx < 3:
             # 先頭１枚だけ保存
-            r0 = (prop_n[0].detach().cpu().numpy() * 255.0).clip(0, 225).astype(np.unit8)
-            t0 = (target[0].detach().cpu().numpy() * 255.0).clip(0, 225).astype(np.unit8)
+            r0 = (prop_n[0].detach().cpu().numpy() * 255.0).clip(0, 225).astype(np.uint8)
+            t0 = (target[0].detach().cpu().numpy() * 255.0).clip(0, 225).astype(np.uint8)
             cv2.imwrite(os.path.join(save_dir, f"prop_b{bidx}.png"), r0)
             cv2.imwrite(os.path.join(save_dir, f"target_b{bidx}.png"), t0)
         
